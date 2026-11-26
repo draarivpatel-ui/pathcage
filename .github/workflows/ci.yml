@@ -21,4 +21,5 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Run deterministic test suite
-        run: npm test
+        shell: bash
+        run: node --test tests/*.test.mjs
