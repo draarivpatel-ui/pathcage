@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { cjs, ROOT, throwsCode } from './helpers.mjs';
 
 const C = cjs.CODE;
@@ -117,7 +118,7 @@ const SAFE_PATHS = [
 
 for (const vector of SAFE_PATHS) {
   test('safe path accepts: ' + JSON.stringify(vector), () => {
-    const expected = ROOT + '/' + vector.replace(/\.\//g, '');
+    const expected = path.join(ROOT, vector.replace(/\.\//g, ''));
     assert.equal(cjs.resolveSafePath(vector, { root: ROOT }), expected);
   });
 }

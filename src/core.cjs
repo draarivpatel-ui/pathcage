@@ -883,8 +883,10 @@ function canonicalizeInside(rootReal, relative, options, hops) {
         }
         throw error;
       }
-      if (/^[a-zA-Z]:/.test(link)) {
-        fail(CODE.SYMLINK_ESCAPE, 'drive-letter symlink target is not allowed', link);
+      const driveTarget = /^[a-zA-Z]:/.test(link);
+      const driveAbsolute = /^[a-zA-Z]:[\\/]/.test(link);
+      if (driveTarget && (path.sep !== '\\' || !driveAbsolute)) {
+        fail(CODE.SYMLINK_ESCAPE, 'drive-relative symlink target is not allowed', link);
       }
       const rawResolved = path.isAbsolute(link)
         ? path.resolve(link)

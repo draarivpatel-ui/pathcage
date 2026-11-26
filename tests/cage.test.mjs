@@ -223,7 +223,7 @@ test('cage realpathCheck rejects absolute paths outside the root', () => {
       [C.OUTSIDE_ROOT, C.SYMLINK_ESCAPE].includes(e.code)
   );
   const inside = path.join(root, 'ok.txt');
-  assert.equal(cage.realpathCheck(inside), fs.realpathSync(root) + '/ok.txt');
+  assert.equal(cage.realpathCheck(inside), path.join(fs.realpathSync(root), 'ok.txt'));
 });
 
 test('ESM and CJS cages agree on realpaths', () => {

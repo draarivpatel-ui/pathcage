@@ -41,10 +41,10 @@ test('backslash and mixed-slash traversal vectors are rejected', () => {
 });
 
 test('absolute paths are rejected on every platform', () => {
-  const vectors = ['/etc/passwd', path.join(ROOT, 'file.txt')];
-  for (const vector of vectors) {
-    throwsCode(() => cjs.resolveSafePath(vector, opts), cjs.CODE.ABSOLUTE_PATH, vector);
-  }
+  throwsCode(() => cjs.resolveSafePath('/etc/passwd', opts), cjs.CODE.ABSOLUTE_PATH);
+  const driveAbsolute = path.join(ROOT, 'file.txt');
+  const expected = process.platform === 'win32' ? cjs.CODE.WINDOWS_DRIVE : cjs.CODE.ABSOLUTE_PATH;
+  throwsCode(() => cjs.resolveSafePath(driveAbsolute, opts), expected, driveAbsolute);
 });
 
 test('prefix confusion: sibling directory with the root prefix is rejected', () => {
@@ -52,7 +52,8 @@ test('prefix confusion: sibling directory with the root prefix is rejected', () 
   throwsCode(() => cjs.resolveSafePath(sibling, opts), cjs.CODE.ABSOLUTE_PATH, sibling);
   // Even an absolute path that lexically starts with the root string is rejected.
   const absolute = ROOT + '-evil/x';
-  throwsCode(() => cjs.resolveSafePath(absolute, opts), cjs.CODE.ABSOLUTE_PATH, absolute);
+  const absoluteCode = process.platform === 'win32' ? cjs.CODE.WINDOWS_DRIVE : cjs.CODE.ABSOLUTE_PATH;
+  throwsCode(() => cjs.resolveSafePath(absolute, opts), absoluteCode, absolute);
   // The cage containment helper itself uses path.relative, never a string prefix.
   assert.equal(cjs.isInside(ROOT, path.join(ROOT, 'a')), true);
   assert.equal(cjs.isInside(ROOT, '/app/uploads-evil/a'), false);

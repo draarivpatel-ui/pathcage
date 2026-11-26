@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { cjs, ROOT, throwsCode } from './helpers.mjs';
 
 const opts = { root: ROOT };
@@ -56,7 +57,7 @@ test('non-device names that merely start with a device prefix are allowed', () =
   for (const vector of ['con.txt.bak', 'COM10', 'LPT0', 'nulified', 'auxiliary.txt']) {
     assert.equal(
       cjs.resolveSafePath(vector, opts),
-      ROOT + '/' + vector
+      path.join(ROOT, vector)
     );
   }
 });
