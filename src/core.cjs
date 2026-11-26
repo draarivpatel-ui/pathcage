@@ -15,6 +15,7 @@ const CODE = Object.freeze({
   INVALID_ROOT: 'ERR_PATHCAGE_INVALID_ROOT',
   NULL_BYTE: 'ERR_PATHCAGE_NULL_BYTE',
   CONTROL_CHARACTER: 'ERR_PATHCAGE_CONTROL_CHARACTER',
+  UNICODE_NORMALIZATION: 'ERR_PATHCAGE_UNICODE_NORMALIZATION',
   ABSOLUTE_PATH: 'ERR_PATHCAGE_ABSOLUTE_PATH',
   TRAVERSAL: 'ERR_PATHCAGE_TRAVERSAL',
   ENCODED_TRAVERSAL: 'ERR_PATHCAGE_ENCODED_TRAVERSAL',
@@ -60,18 +61,52 @@ function fail(code, reason, input, cause) {
 // Reserved device names are matched with or without one extension.
 // "con.txt.bak" is a valid file name, so only one dot-isolated suffix counts.
 const WINDOWS_DEVICE_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.[^.]*)?$/i;
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
-const UNSAFE_FILENAME_RE = /[\\/:*?"<>|\u0000-\u001f\u007f-\u009f]/g;
+// C0 and C1 controls plus bidirectional formatting characters. Bidi overrides
+// (U+202E and friends) are invisible and reverse the rendered order of the
+// characters that follow them, which is the classic filename spoofing trick.
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const UNSAFE_FILENAME_RE = /[\\/:*?"<>|\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const DEFAULT_MAX_PATH_LENGTH = 4096;
 const MAX_SYMLINK_HOPS = 40;
+const MAX_DECODE_LAYERS = 8;
 
 function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/*
+ * Copy option bags explicitly. Object.assign would invoke the Object.prototype
+ * __proto__ setter when a JSON parsed bag carries a "__proto__" key, which lets
+ * an option such as decodeCheck or noSymlinks leak in through the prototype
+ * chain. Reserved keys are rejected instead of silently rewiring options.
+ */
+function mergeOptions(...sources) {
+  const target = {};
+  for (const source of sources) {
+    if (source === undefined || source === null) continue;
+    if (!isPlainObject(source)) {
+      fail(CODE.INVALID_INPUT, 'options must be an object', source);
+    }
+    for (const key of Object.keys(source)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        fail(CODE.INVALID_INPUT, 'reserved option key is not allowed', key);
+      }
+      target[key] = source[key];
+    }
+  }
+  return target;
 }
 
 function asNonNegativeInteger(value, fallback, label) {
   if (value === undefined) return fallback;
-  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
     fail(CODE.INVALID_INPUT, label + ' must be a non-negative integer', value);
   }
   return value;
@@ -82,7 +117,7 @@ function normalizeOptions(options) {
   if (!isPlainObject(options)) {
     fail(CODE.INVALID_INPUT, 'options must be an object', options);
   }
-  const merged = Object.assign({}, options);
+  const merged = mergeOptions(options);
   merged.maxPathLength = asNonNegativeInteger(
     options.maxPathLength, DEFAULT_MAX_PATH_LENGTH, 'maxPathLength'
   );
@@ -140,23 +175,201 @@ function collectSegments(value, input) {
   return result;
 }
 
-function inspectDecodedLayer(decoded, input, depth) {
-  const flat = decoded.replace(/\\/g, '/');
-  const parts = flat.split('/');
-  if (
-    parts.includes('..') ||
-    /^[a-zA-Z]:/.test(flat) ||
-    flat.startsWith('//') ||
-    flat.includes('\u0000') ||
-    CONTROL_RE.test(decoded) ||
-    /[\\/]/.test(decoded) && /%2e|%2f|%5c/i.test(decoded)
-  ) {
+/*
+ * Reject inputs whose Unicode compatibility form (NFKC) would introduce a
+ * separator, navigation segment, drive marker, alternate data stream, device
+ * name or trailing dot. A fullwidth slash or dot is a literal character for
+ * the kernel, but any consumer that normalizes text before joining it into a
+ * filesystem path turns it back into a real separator. When the normalized
+ * form is still harmless the input is left untouched.
+ */
+function countSeparators(value) {
+  let count = 0;
+  for (const char of value) {
+    if (char === '/' || char === '\\') count += 1;
+  }
+  return count;
+}
+
+function inspectUnicodeHazards(value, input) {
+  const compat = value.normalize('NFKC');
+  if (compat === value) return;
+  // Normalization can only introduce separators, never remove one, so any
+  // change in the total count means a compatibility character (fullwidth
+  // slash, reverse solidus) has turned into a real separator.
+  if (countSeparators(compat) !== countSeparators(value)) {
     fail(
-      CODE.ENCODED_TRAVERSAL,
-      'encoded traversal or separator detected at decode layer ' + depth,
+      CODE.UNICODE_NORMALIZATION,
+      'a path separator appears under Unicode NFKC normalization',
       input
     );
   }
+  if (/^[a-zA-Z]:/.test(compat)) {
+    fail(
+      CODE.UNICODE_NORMALIZATION,
+      'a drive marker appears under Unicode NFKC normalization',
+      input
+    );
+  }
+  if (CONTROL_RE.test(compat)) {
+    fail(
+      CODE.UNICODE_NORMALIZATION,
+      'a control character appears under Unicode NFKC normalization',
+      input
+    );
+  }
+  for (const segment of compat.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..' || segment.startsWith('..')) {
+      fail(
+        CODE.UNICODE_NORMALIZATION,
+        'a parent segment appears under Unicode NFKC normalization',
+        input
+      );
+    }
+    if (segment.includes(':')) {
+      fail(
+        CODE.UNICODE_NORMALIZATION,
+        'an alternate data stream marker appears under Unicode NFKC normalization',
+        input
+      );
+    }
+    if (WINDOWS_DEVICE_RE.test(segment)) {
+      fail(
+        CODE.UNICODE_NORMALIZATION,
+        'a reserved device name appears under Unicode NFKC normalization',
+        input
+      );
+    }
+    if (segment.endsWith('.') || segment.endsWith(' ')) {
+      fail(
+        CODE.UNICODE_NORMALIZATION,
+        'a trailing dot or space appears under Unicode NFKC normalization',
+        input
+      );
+    }
+  }
+}
+
+/*
+ * Decode every syntactically valid %HH run in one pass. Invalid UTF-8 inside a
+ * run is reported instead of silently aborting the whole layer, which would
+ * let "%2e%2e%2f%ZZ" hide a traversal behind a malformed tail.
+ */
+function decodePercentOnce(value) {
+  let malformed = false;
+  const text = value.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      malformed = true;
+      return run;
+    }
+  });
+  return { text, malformed };
+}
+
+function decodePercentLayers(value, input, inspect) {
+  let layer = value;
+  const seen = new Set([layer]);
+  for (let depth = 1; depth <= MAX_DECODE_LAYERS; depth += 1) {
+    const decoded = decodePercentOnce(layer);
+    if (decoded.malformed) {
+      fail(
+        CODE.ENCODED_TRAVERSAL,
+        'percent-encoded bytes are not valid UTF-8',
+        input
+      );
+    }
+    if (decoded.text === layer || seen.has(decoded.text)) break;
+    seen.add(decoded.text);
+    if (inspect) inspectDecodedLayer(decoded.text, input, depth);
+    layer = decoded.text;
+  }
+  return layer;
+}
+
+function inspectDecodedLayer(decoded, input, depth) {
+  const flat = decoded.replace(/\\/g, '/');
+  const parts = flat.split('/');
+  for (const part of parts) {
+    // Any parent reference in a decoded layer is hostile. Unlike the raw
+    // segment walk there is no legitimate reason to encode one.
+    if (part === '..' || part.startsWith('..')) {
+      fail(
+        CODE.ENCODED_TRAVERSAL,
+        'encoded traversal detected at decode layer ' + depth,
+        input
+      );
+    }
+  }
+  if (/^[a-zA-Z]:/.test(flat)) {
+    fail(
+      CODE.ENCODED_TRAVERSAL,
+      'encoded drive letter detected at decode layer ' + depth,
+      input
+    );
+  }
+  if (flat.startsWith('//')) {
+    fail(
+      CODE.ENCODED_TRAVERSAL,
+      'encoded UNC path detected at decode layer ' + depth,
+      input
+    );
+  }
+  if (flat.startsWith('/')) {
+    fail(
+      CODE.ENCODED_TRAVERSAL,
+      'encoded absolute path detected at decode layer ' + depth,
+      input
+    );
+  }
+  if (flat.includes('\u0000')) {
+    fail(
+      CODE.ENCODED_TRAVERSAL,
+      'encoded null byte detected at decode layer ' + depth,
+      input
+    );
+  }
+  if (CONTROL_RE.test(decoded)) {
+    fail(
+      CODE.ENCODED_TRAVERSAL,
+      'encoded control character detected at decode layer ' + depth,
+      input
+    );
+  }
+  if (decoded.includes('\\')) {
+    fail(
+      CODE.BACKSLASH_SEPARATOR,
+      'encoded backslash separator detected at decode layer ' + depth,
+      input
+    );
+  }
+  for (const part of parts) {
+    if (part === '' || part === '.') continue;
+    if (part.includes(':')) {
+      fail(
+        CODE.ALTERNATE_DATA_STREAM,
+        'encoded alternate data stream detected at decode layer ' + depth,
+        input
+      );
+    }
+    if (WINDOWS_DEVICE_RE.test(part)) {
+      fail(
+        CODE.WINDOWS_DEVICE,
+        'encoded reserved device name detected at decode layer ' + depth,
+        input
+      );
+    }
+    if (part.endsWith('.') || part.endsWith(' ')) {
+      fail(
+        CODE.TRAILING_DOT_OR_SPACE,
+        'encoded trailing dot or space detected at decode layer ' + depth,
+        input
+      );
+    }
+  }
+  inspectUnicodeHazards(decoded, input);
   return decoded;
 }
 
@@ -177,6 +390,7 @@ function inspectInput(input, options) {
   if (CONTROL_RE.test(input)) {
     fail(CODE.CONTROL_CHARACTER, 'control character in path', input);
   }
+  inspectUnicodeHazards(input, input);
   if (/^[a-zA-Z]:\$/.test(input)) {
     fail(CODE.ALTERNATE_DATA_STREAM, 'alternate data stream is not allowed', input);
   }
@@ -214,20 +428,7 @@ function inspectInput(input, options) {
     }
   }
   if (options.decodeCheck === true) {
-    let layer = input;
-    const seen = new Set([layer]);
-    for (let depth = 1; depth <= 3; depth += 1) {
-      let decoded;
-      try {
-        decoded = decodeURIComponent(layer);
-      } catch {
-        break;
-      }
-      if (seen.has(decoded)) break;
-      seen.add(decoded);
-      inspectDecodedLayer(decoded, input, depth);
-      layer = decoded;
-    }
+    decodePercentLayers(input, input, true);
   }
   return segments;
 }
@@ -263,10 +464,30 @@ function assertSafePath(input, options) {
   return resolveSafePath(input, options);
 }
 
+function applyDevicePrefix(candidate, replacement) {
+  if (candidate === '') return candidate;
+  return WINDOWS_DEVICE_RE.test(candidate) ? replacement + candidate : candidate;
+}
+
+function scrubFilename(text, replacement) {
+  const segments = text
+    .split(/[\\/]/)
+    .filter((part) => part !== '' && part !== '.' && part !== '..');
+  let candidate = segments.length > 0 ? segments[segments.length - 1] : '';
+  candidate = candidate.replace(UNSAFE_FILENAME_RE, replacement);
+  return candidate.replace(/[. ]+$/g, '');
+}
+
 /**
  * Turn arbitrary text into a single safe, flat filename.
  * Directory components, separators, control characters and Windows hazards
  * are removed or replaced. The result never contains a separator.
+ *
+ * Compatibility normalization runs first so that fullwidth separators and
+ * dots cannot become real separators after the value leaves this function.
+ * The fallback value goes through the same scrubbing as the input, and the
+ * device-name check runs again after truncation, so neither path can return
+ * a reserved name.
  */
 function sanitizeFilename(input, options) {
   const opts = normalizeOptions(options);
@@ -276,40 +497,41 @@ function sanitizeFilename(input, options) {
   if (input.length === 0 && typeof opts.fallback !== 'string') {
     fail(CODE.INVALID_INPUT, 'filename must be a non-empty string', input);
   }
-  let value = input;
-  if (opts.decodeCheck === true) {
-    for (let depth = 0; depth < 3; depth += 1) {
-      let decoded;
-      try {
-        decoded = decodeURIComponent(value);
-      } catch {
-        break;
-      }
-      if (decoded === value) break;
-      value = decoded;
-    }
+  if (input.length > opts.maxPathLength) {
+    fail(CODE.LIMIT_EXCEEDED, 'filename exceeds maxPathLength', input);
   }
-  const rawSegments = value.split(/[\\/]/).filter((part) => part !== '' && part !== '.' && part !== '..');
-  let candidate = rawSegments.length > 0 ? rawSegments[rawSegments.length - 1] : '';
   const replacement = opts.replacement === undefined ? '_' : opts.replacement;
-  if (typeof replacement !== 'string' || replacement.length > 1 || replacement.includes('/') || replacement.includes('\\')) {
+  if (
+    typeof replacement !== 'string' ||
+    replacement.length !== 1 ||
+    replacement.includes('/') ||
+    replacement.includes('\\') ||
+    CONTROL_RE.test(replacement)
+  ) {
     fail(CODE.INVALID_INPUT, 'replacement must be a single safe character', replacement);
   }
-  candidate = candidate.replace(UNSAFE_FILENAME_RE, replacement);
-  candidate = candidate.replace(/[. ]+$/g, '');
-  if (WINDOWS_DEVICE_RE.test(candidate)) {
-    candidate = replacement + candidate;
-  }
-  if (candidate === '' || candidate === '.') {
-    if (typeof opts.fallback === 'string' && opts.fallback.length > 0) {
-      candidate = opts.fallback;
-    } else {
-      fail(CODE.INVALID_INPUT, 'filename has no safe characters left', input);
-    }
+  let value = input.normalize('NFKC');
+  if (opts.decodeCheck === true) {
+    value = decodePercentLayers(value, input, false);
   }
   const maxLength = asNonNegativeInteger(opts.maxLength, 255, 'maxLength');
+  const fallback = typeof opts.fallback === 'string' && opts.fallback.length > 0
+    ? opts.fallback.normalize('NFKC')
+    : null;
+  let candidate = scrubFilename(value, replacement);
+  if (candidate === '') {
+    if (fallback !== null) candidate = scrubFilename(fallback, replacement);
+  }
+  if (candidate === '' || candidate === '.') {
+    fail(CODE.INVALID_INPUT, 'filename has no safe characters left', input);
+  }
+  candidate = applyDevicePrefix(candidate, replacement);
   if (candidate.length > maxLength) {
     candidate = candidate.slice(0, maxLength).replace(/[. ]+$/g, '');
+    candidate = applyDevicePrefix(candidate, replacement);
+    if (candidate.length > maxLength) {
+      candidate = candidate.slice(0, maxLength).replace(/[. ]+$/g, '');
+    }
   }
   if (candidate === '' || candidate.includes('/') || candidate.includes('\\') || CONTROL_RE.test(candidate)) {
     fail(CODE.INVALID_INPUT, 'sanitized filename is not safe', input);
@@ -335,7 +557,7 @@ const ARCHIVE_DEFAULTS = Object.freeze({
 
 function normalizeArchiveOptions(options) {
   const base = normalizeOptions(options);
-  const merged = Object.assign({}, ARCHIVE_DEFAULTS, base);
+  const merged = mergeOptions(ARCHIVE_DEFAULTS, base);
   merged.maxFiles = asNonNegativeInteger(merged.maxFiles, ARCHIVE_DEFAULTS.maxFiles, 'maxFiles');
   merged.maxFileSize = asNonNegativeInteger(merged.maxFileSize, ARCHIVE_DEFAULTS.maxFileSize, 'maxFileSize');
   merged.maxTotalSize = asNonNegativeInteger(merged.maxTotalSize, ARCHIVE_DEFAULTS.maxTotalSize, 'maxTotalSize');
@@ -365,14 +587,24 @@ function normalizeArchiveEntry(raw) {
   return { path: raw.path, type, size, compressedSize, linkTarget: raw.linkTarget };
 }
 
+/*
+ * Unicode canonical normalization folds the names that case-insensitive
+ * filesystems (APFS, HFS+, NTFS with normalization) treat as the same file,
+ * and trailing separators fold "dir" and "dir/". Both would otherwise allow
+ * a later entry to silently overwrite an earlier one.
+ */
 function archiveKey(normalizedPath, options) {
-  return options.caseInsensitive === true ? normalizedPath.toLowerCase() : normalizedPath;
+  const canonical = normalizedPath.normalize('NFC');
+  return options.caseInsensitive === true ? canonical.toLowerCase() : canonical;
 }
 
 function validateLinkTarget(entry, normalizedPath, options) {
   const target = entry.linkTarget;
   if (typeof target !== 'string' || target.length === 0) {
     fail(CODE.ARCHIVE_LINK, 'link entry requires a non-empty linkTarget', entry);
+  }
+  if (target.length > options.maxPathLength) {
+    fail(CODE.LIMIT_EXCEEDED, 'link target exceeds maxPathLength', entry);
   }
   // A relative symlink may legitimately contain '..' as long as it stays
   // inside the subtree containing the link. Resolving from the archive root
@@ -437,13 +669,14 @@ function validateArchiveEntry(rawEntry, options) {
     fail(CODE.ARCHIVE_PATH, 'archive entry path must be a non-empty string', rawEntry);
   }
   inspectInput(rawPath, opts);
-  const normalized = path.posix.normalize(rawPath.replace(/\\/g, '/'));
+  const normalized = path.posix
+    .normalize(rawPath.replace(/\\/g, '/'))
+    .replace(/\/+$/, '');
   if (
+    normalized === '' ||
     normalized === '.' ||
-    normalized === './' ||
-    normalized === '/' ||
-    normalized.startsWith('/') ||
     normalized === '..' ||
+    normalized.startsWith('/') ||
     normalized.startsWith('../')
   ) {
     fail(CODE.ARCHIVE_PATH, 'archive entry path is absolute or empty after normalization', rawEntry);
@@ -461,16 +694,32 @@ function validateArchiveEntry(rawEntry, options) {
   if (entry.type === 'directory' && entry.size !== 0) {
     fail(CODE.ARCHIVE_LIMIT, 'directory entries must have size 0', rawEntry);
   }
-  const state = opts.state || { seen: new Set(), files: 0, totalSize: 0 };
+  let state;
+  if (opts.state === undefined) {
+    state = { seen: new Set(), files: 0, totalSize: 0 };
+  } else if (
+    isPlainObject(opts.state) &&
+    opts.state.seen instanceof Set &&
+    typeof opts.state.files === 'number' &&
+    typeof opts.state.totalSize === 'number'
+  ) {
+    state = opts.state;
+  } else {
+    fail(CODE.INVALID_INPUT, 'state must be an archive state object', opts.state);
+  }
   if (state.files >= opts.maxFiles) {
     fail(CODE.ARCHIVE_LIMIT, 'archive file count exceeds maxFiles', rawEntry);
   }
+  // Sizes are safe integers, so the sum below cannot silently round and the
+  // limits compare exact values.
   if (entry.size > opts.maxFileSize) {
     fail(CODE.ARCHIVE_LIMIT, 'entry exceeds maxFileSize', rawEntry);
   }
-  if (state.totalSize + entry.size > opts.maxTotalSize) {
+  if (state.totalSize > opts.maxTotalSize - entry.size) {
     fail(CODE.ARCHIVE_LIMIT, 'archive exceeds maxTotalSize', rawEntry);
   }
+  // Zero compressed size on a non-empty entry is the infinite-ratio bomb and
+  // must be rejected before any division happens.
   if (entry.compressedSize === 0 && entry.size > 0) {
     fail(CODE.ARCHIVE_ZIP_BOMB, 'non-empty entry has zero compressed size', rawEntry);
   }
@@ -503,7 +752,7 @@ function createArchiveGuard(options) {
 
   function validate(entry) {
     // validateArchiveEntry updates the supplied state on success.
-    return validateArchiveEntry(entry, Object.assign({}, opts, { state }));
+    return validateArchiveEntry(entry, mergeOptions(opts, { state }));
   }
 
   function validateBatch(entries) {
@@ -530,13 +779,30 @@ function createArchiveGuard(options) {
  * Cage: root containment with real filesystem symlink checks
  * ------------------------------------------------------------------ */
 
+function lstatOrNull(target, input) {
+  try {
+    return fs.lstatSync(target);
+  } catch (error) {
+    if (!error) throw error;
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    if (error.code === 'ELOOP') {
+      fail(CODE.SYMLINK_ESCAPE, 'symlink loop detected while resolving the path', input, error);
+    }
+    if (error.code === 'ENAMETOOLONG') {
+      fail(CODE.LIMIT_EXCEEDED, 'path is too long for the filesystem', input, error);
+    }
+    throw error;
+  }
+}
+
 function resolveRealAncestor(target, options) {
-  // Check the root itself and every explicit path component from the root up
-  // to the first existing ancestor. A symlink in that user-controlled portion
-  // is rejected under the strict noSymlinks policy. Ancestors above it (the
-  // platform temp directory on macOS is a symlink) are out of scope.
-  // Build the chain from the filesystem root down to the target, then start
-  // checking at the first component that actually exists.
+  // Walk every existing component from the filesystem root down to the
+  // target. A symlink that sits directly under the filesystem root is a
+  // platform alias such as /var or /tmp on macOS: no unprivileged principal
+  // can create or replace it. Every deeper symlink is user controlled and is
+  // rejected under the strict noSymlinks policy, regardless of where it
+  // appears in the chain. Trusting only the first symlink seen would let a
+  // user controlled ancestor through whenever no platform alias precedes it.
   const chain = [];
   let cursor = target;
   for (;;) {
@@ -545,8 +811,6 @@ function resolveRealAncestor(target, options) {
     cursor = path.dirname(cursor);
   }
   chain.reverse();
-  let active = false;
-  let skippedPlatformLink = false;
   for (const component of chain) {
     let stat;
     try {
@@ -554,19 +818,10 @@ function resolveRealAncestor(target, options) {
     } catch {
       continue;
     }
-    if (!active) {
-      active = true;
-      continue;
-    }
-    // Platform-provided symlinks such as /var -> /private/var on macOS
-    // are trusted once. User-controlled symlinks are not.
-    if (!skippedPlatformLink && stat.isSymbolicLink()) {
-      skippedPlatformLink = true;
-      continue;
-    }
-    if (options.noSymlinks === true && stat.isSymbolicLink()) {
-      fail(CODE.FORBIDDEN_SYMLINK, 'symlink in root path is not allowed', target);
-    }
+    if (!stat.isSymbolicLink()) continue;
+    if (options.noSymlinks !== true) continue;
+    if (path.dirname(component) === path.parse(component).root) continue;
+    fail(CODE.FORBIDDEN_SYMLINK, 'symlink in root path is not allowed', target);
   }
   // Resolve the deepest existing ancestor and reattach any missing tail,
   // so nonexistent leaf paths are still canonical underneath their parent.
@@ -578,7 +833,14 @@ function resolveRealAncestor(target, options) {
       while (tail.length > 0) real = path.join(real, tail.pop());
       return real;
     } catch (error) {
-      if (!error || error.code !== 'ENOENT') throw error;
+      if (!error) throw error;
+      if (error.code === 'ELOOP') {
+        fail(CODE.SYMLINK_ESCAPE, 'symlink loop detected while resolving the path', target, error);
+      }
+      if (error.code === 'ENAMETOOLONG') {
+        fail(CODE.LIMIT_EXCEEDED, 'path is too long for the filesystem', target, error);
+      }
+      if (error.code !== 'ENOENT') throw error;
       const parent = path.dirname(realCursor);
       if (parent === realCursor) return target;
       tail.push(path.basename(realCursor));
@@ -600,21 +862,27 @@ function canonicalizeInside(rootReal, relative, options, hops) {
   while (queue.length > 0) {
     const segment = queue.shift();
     const next = path.join(current, segment);
-    let stat;
-    try {
-      stat = fs.lstatSync(next);
-    } catch (error) {
-      if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
-        current = next;
-        continue;
-      }
-      throw error;
+    const stat = lstatOrNull(next, relative);
+    if (stat === null) {
+      current = next;
+      continue;
     }
     if (stat.isSymbolicLink()) {
       if (options.noSymlinks === true) {
         fail(CODE.FORBIDDEN_SYMLINK, 'symlink components are disabled', next);
       }
-      const link = fs.readlinkSync(next);
+      let link;
+      try {
+        link = fs.readlinkSync(next);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          // The link disappeared between lstat and readlink; treat the
+          // component as nonexistent rather than leaking a system error.
+          current = next;
+          continue;
+        }
+        throw error;
+      }
       if (/^[a-zA-Z]:/.test(link)) {
         fail(CODE.SYMLINK_ESCAPE, 'drive-letter symlink target is not allowed', link);
       }
@@ -654,16 +922,11 @@ function createCage(rootDir, options) {
   const opts = normalizeCageOptions(rootDir, options);
   const root = path.resolve(rootDir);
 
-  let rootStat;
-  try {
-    rootStat = fs.lstatSync(root);
-  } catch (error) {
-    if (!error || (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')) throw error;
-    if (opts.mustExist === true) {
-      fail(CODE.INVALID_ROOT, 'root directory does not exist', rootDir, error);
-    }
+  const rootStat = lstatOrNull(root, rootDir);
+  if (rootStat === null && opts.mustExist === true) {
+    fail(CODE.INVALID_ROOT, 'root directory does not exist', rootDir);
   }
-  if (rootStat) {
+  if (rootStat !== null) {
     if (rootStat.isSymbolicLink()) {
       if (opts.noSymlinks === true) {
         fail(CODE.FORBIDDEN_SYMLINK, 'root directory is a symlink', rootDir);
@@ -675,28 +938,29 @@ function createCage(rootDir, options) {
   const rootReal = resolveRealAncestor(root, opts);
 
   function resolve(input, localOptions) {
-    return resolveSafePath(input, Object.assign({}, opts, localOptions, { root }));
+    return resolveSafePath(input, mergeOptions(opts, localOptions, { root }));
   }
 
   function realpathCheck(candidate, localOptions) {
-    const merged = Object.assign({}, opts, localOptions, { root });
-    let absolute;
-    if (typeof candidate === 'string' && path.isAbsolute(candidate)) {
-      absolute = path.resolve(candidate);
+    const merged = mergeOptions(opts, localOptions, { root });
+    if (typeof candidate !== 'string' || candidate.length === 0) {
+      fail(CODE.INVALID_INPUT, 'path must be a non-empty string', candidate);
+    }
+    let relative;
+    if (path.isAbsolute(candidate)) {
+      // Keep the lexical walk for absolute inputs as well. Resolving the
+      // candidate with the filesystem first would erase the symlink names
+      // and silently bypass the strict noSymlinks policy that relative
+      // inputs are held to.
+      const absolute = path.resolve(candidate);
       assertLexicalInside(root, absolute, candidate);
-      const realCandidate = resolveRealAncestor(absolute, {
-        noSymlinks: false
-      });
-      if (!isInside(rootReal, realCandidate)) {
-        fail(CODE.SYMLINK_ESCAPE, 'candidate is outside the real root', candidate);
-      }
-      absolute = realCandidate;
+      relative = path.relative(root, absolute);
     } else {
       // Resolve relative inputs against the real root so that a symlinked
       // ancestor (for example /var on macOS) is never re-walked below here.
-      absolute = resolveSafePath(candidate, Object.assign({}, merged, { root: rootReal }));
+      const absolute = resolveSafePath(candidate, mergeOptions(merged, { root: rootReal }));
+      relative = path.relative(rootReal, absolute);
     }
-    const relative = path.relative(rootReal, absolute);
     return canonicalizeInside(rootReal, relative, merged, 0);
   }
 
@@ -712,7 +976,7 @@ function createCage(rootDir, options) {
     const sensitive = opts.caseInsensitive === true;
     return inputs.map((input) => {
       const result = assertInside(input, localOptions);
-      const key = sensitive ? result.toLowerCase() : result;
+      const key = (sensitive ? result.toLowerCase() : result).normalize('NFC');
       if (seen.has(key)) {
         fail(CODE.DUPLICATE_PATH, 'duplicate or case-insensitive colliding path', input);
       }

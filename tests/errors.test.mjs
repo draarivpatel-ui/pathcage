@@ -37,6 +37,7 @@ test('PathCageError constructor is shared between ESM and CJS', () => {
 test('all documented error codes are exposed', () => {
   const expected = [
     'INVALID_INPUT', 'INVALID_ROOT', 'NULL_BYTE', 'CONTROL_CHARACTER',
+    'UNICODE_NORMALIZATION',
     'ABSOLUTE_PATH', 'TRAVERSAL', 'ENCODED_TRAVERSAL', 'WINDOWS_DRIVE',
     'WINDOWS_UNC', 'WINDOWS_PREFIX', 'WINDOWS_DEVICE', 'ALTERNATE_DATA_STREAM',
     'TRAILING_DOT_OR_SPACE', 'BACKSLASH_SEPARATOR', 'OUTSIDE_ROOT',

@@ -4,6 +4,7 @@ export const CODE: Readonly<{
   INVALID_ROOT: 'ERR_PATHCAGE_INVALID_ROOT';
   NULL_BYTE: 'ERR_PATHCAGE_NULL_BYTE';
   CONTROL_CHARACTER: 'ERR_PATHCAGE_CONTROL_CHARACTER';
+  UNICODE_NORMALIZATION: 'ERR_PATHCAGE_UNICODE_NORMALIZATION';
   ABSOLUTE_PATH: 'ERR_PATHCAGE_ABSOLUTE_PATH';
   TRAVERSAL: 'ERR_PATHCAGE_TRAVERSAL';
   ENCODED_TRAVERSAL: 'ERR_PATHCAGE_ENCODED_TRAVERSAL';
@@ -30,6 +31,7 @@ export const CODE: Readonly<{
 export type PathCageErrorCode =
   'ERR_PATHCAGE_INVALID_INPUT' | 'ERR_PATHCAGE_INVALID_ROOT' |
   'ERR_PATHCAGE_NULL_BYTE' | 'ERR_PATHCAGE_CONTROL_CHARACTER' |
+  'ERR_PATHCAGE_UNICODE_NORMALIZATION' |
   'ERR_PATHCAGE_ABSOLUTE_PATH' | 'ERR_PATHCAGE_TRAVERSAL' |
   'ERR_PATHCAGE_ENCODED_TRAVERSAL' | 'ERR_PATHCAGE_WINDOWS_DRIVE' |
   'ERR_PATHCAGE_WINDOWS_UNC' | 'ERR_PATHCAGE_WINDOWS_PREFIX' |
@@ -147,6 +149,12 @@ export interface ArchiveOptions {
   maxPathLength?: number;
 }
 
+export interface ArchiveState {
+  seen: Set<string>;
+  files: number;
+  totalSize: number;
+}
+
 export interface ArchiveGuard {
   /** Validate and record a single entry. */
   validate(entry: ArchiveEntry | string): ValidatedArchiveEntry;
@@ -167,7 +175,7 @@ export declare function sanitizeFilename(input: string, options?: FilenameOption
 /** Validate a single archive entry against limits and collision state. */
 export declare function validateArchiveEntry(
   entry: ArchiveEntry | string,
-  options?: ArchiveOptions & { state?: unknown }
+  options?: ArchiveOptions & { state?: ArchiveState }
 ): ValidatedArchiveEntry;
 /** Create a stateful archive validator with cumulative limits. */
 export declare function createArchiveGuard(options?: ArchiveOptions): ArchiveGuard;
@@ -191,6 +199,8 @@ declare const pathcage: {
   validateArchiveEntry: typeof validateArchiveEntry;
   createArchiveGuard: typeof createArchiveGuard;
   createCage: typeof createCage;
+  isInside: typeof isInside;
+  assertLexicalInside: typeof assertLexicalInside;
 };
 
 export default pathcage;

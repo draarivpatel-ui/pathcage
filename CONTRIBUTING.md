@@ -20,7 +20,7 @@ node --version        # 18 or newer
 npm test              # node --test tests/*.test.mjs
 ```
 
-The suite has 167 tests covering traversal, Windows syntax, archives, symlinks, error metadata, ESM/CJS parity and vector matrices. A change is not done until all 167 pass.
+The suite has 199 tests covering traversal, Windows syntax, archives, symlinks, Unicode normalization, encoding layers, error metadata, ESM/CJS/typings parity and vector matrices. A change is not done until all 199 pass.
 
 ## Project layout
 

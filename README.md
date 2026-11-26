@@ -8,9 +8,10 @@ Zero-dependency path traversal, zip-slip and symlink-escape protection for Node.
 - **Dual module.** Native ESM (`import`) and CommonJS (`require`) entry points, plus a strict `.d.ts`.
 - **Containment by segments.** Never uses string prefixes, so `/app/uploads-evil` is not mistaken for a child of `/app/uploads`.
 - **Real filesystem checks.** Resolves existing ancestors and every symlink hop, then verifies the result is inside the cage root.
-- **Archive aware.** Validates archive entry paths, link targets, file counts, sizes, compression ratios and case-insensitive collisions.
+- **Unicode aware.** Rejects compatibility lookalikes (fullwidth slashes and dots) that become separators under NFKC normalization, and bidirectional control characters used for filename spoofing.
+- **Archive aware.** Validates archive entry paths, link targets, file counts, sizes, compression ratios and normalization-insensitive collisions.
 
-**Tests:** 167 passing with `npm test` (Node 18+).
+**Tests:** 199 passing with `npm test` (Node 18+).
 
 ## Install
 
@@ -67,7 +68,7 @@ Options:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `root` | required | Absolute root directory. |
-| `decodeCheck` | `false` | Decode percent-encoded layers and reject encoded traversal. |
+| `decodeCheck` | `false` | Decode up to eight percent-encoded layers and reject encoded traversal, separators, streams and invalid UTF-8 escapes. |
 | `maxPathLength` | `4096` | Reject inputs longer than this. |
 
 ### `assertSafePath(input, options)`
@@ -76,15 +77,16 @@ Alias of `resolveSafePath`.
 
 ### `sanitizeFilename(input, options?)`
 
-Reduces arbitrary text to a single flat filename safe on POSIX and Windows. Removes separators, control characters, trailing dots and spaces, and neutralizes reserved device names.
+Reduces arbitrary text to a single flat filename safe on POSIX and Windows. Removes separators, control characters, bidirectional overrides, trailing dots and spaces, and neutralizes reserved device names. The input is compatibility normalized (NFKC) first, so a fullwidth slash can never become a separator after the call, and the fallback value is scrubbed exactly like the input.
 
 ```js
 sanitizeFilename('../../CON.txt');        // => '_CON.txt'
 sanitizeFilename('a/b/report?.txt');      // => 'report_.txt'
 sanitizeFilename('file.txt:hidden');      // => 'file.txt_hidden'
+sanitizeFilename('', { fallback: 'CON' });// => '_CON'
 ```
 
-Options: `replacement` (default `'_'`), `fallback`, `maxLength` (default `255`), `decodeCheck`.
+Options: `replacement` (default `'_'`), `fallback`, `maxLength` (default `255`), `decodeCheck`, `maxPathLength` (default `4096`).
 
 ### `validateArchiveEntry(entry, options?)`
 
@@ -100,7 +102,7 @@ Validates one archive entry before extraction. Accepts a path string or an objec
 }
 ```
 
-Rejects absolute paths, parent traversal, encoded traversal, backslashes, drive letters, UNC paths, device names, null bytes, link entries pointing outside the archive, entries over `maxFileSize`, totals over `maxTotalSize`, counts over `maxFiles`, compression ratios over `maxCompressionRatio`, and case-insensitive path collisions.
+Rejects absolute paths, parent traversal, encoded traversal, backslashes, drive letters, UNC paths, device names, null bytes, link entries pointing outside the archive, entries over `maxFileSize`, totals over `maxTotalSize`, counts over `maxFiles`, compression ratios over `maxCompressionRatio`, and collisions that are visible to case-insensitive or normalization-insensitive filesystems. Sizes must be non-negative safe integers, compressed sizes of zero on non-empty entries are treated as bombs, link targets are length capped, and trailing slashes are folded so `dir` and `dir/` collide.
 
 ### `createArchiveGuard(options?)`
 
@@ -129,9 +131,9 @@ Methods: `validate(entry)`, `validateBatch(entries)`, `stats()`, `reset()`.
 Creates a cage bound to a root directory. Methods:
 
 - `resolve(input)` lexically resolve an input underneath the root.
-- `realpathCheck(candidate)` resolve and verify every existing path component and symlink hop.
+- `realpathCheck(candidate)` resolve and verify every existing path component and symlink hop. Absolute and relative candidates are held to the same symlink policy.
 - `assertInside(candidate)` alias of `realpathCheck`.
-- `validateBatch(inputs)` resolve a batch and reject duplicates or case-insensitive collisions.
+- `validateBatch(inputs)` resolve a batch and reject duplicates or case-insensitive and Unicode-normalization collisions.
 
 Options:
 
@@ -250,12 +252,13 @@ function readTool(args) {
 
 `pathcage` defends against:
 
-- Classic and encoded traversal: `../`, `..\`, mixed slashes, `%2e%2e%2f`, double encoding.
+- Classic and encoded traversal: `../`, `..\`, mixed slashes, `%2e%2e%2f`, up to eight encoding layers, and malformed percent escapes that would otherwise hide an encoded traversal.
 - Absolute path injection and prefix confusion: `/app/uploads-evil` is not a child of `/app/uploads`.
-- Null bytes, control characters, trailing dots and spaces.
+- Null bytes, control characters, bidirectional overrides and isolates, trailing dots and spaces.
+- Compatibility lookalikes that become separators, parent segments, device names or streams under Unicode NFKC normalization (for example fullwidth slashes and dots). Arbitrary homoglyphs that do not normalize into separators are not separators for any filesystem.
 - Windows drive letters, drive-relative paths, UNC paths, extended-length prefixes (`\\?\`, `\\.\`), alternate data streams and reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`).
-- Real symlink escapes, including chained symlinks, absolute targets, directory symlinks and sibling-prefix escapes.
-- Zip-slip and tar-slip entries, link entries escaping the archive, decompression bombs and case-insensitive collisions.
+- Real symlink escapes, including chained symlinks, absolute targets, directory symlinks, dangling links, links reached through a nonexistent tail, sibling-prefix escapes and symlink loops.
+- Zip-slip and tar-slip entries, link entries escaping the archive, decompression bombs, unsafe integer sizes and collisions that case-insensitive or normalization-insensitive filesystems would merge.
 
 `pathcage` does not:
 

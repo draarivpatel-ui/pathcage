@@ -39,9 +39,12 @@ The following are generally out of scope:
 ## Security design notes
 
 - Containment is decided on path segments via `path.relative`, never on string prefixes. This prevents sibling-directory confusion.
-- Lexical checks and real filesystem checks are separate. `createCage().resolve()` is lexical; `realpathCheck()` / `assertInside()` walk existing ancestors and every symlink hop.
+- Lexical checks and real filesystem checks are separate. `createCage().resolve()` is lexical; `realpathCheck()` / `assertInside()` walk existing ancestors and every symlink hop. Absolute candidates go through the same lexical symlink walk as relative ones.
+- Strict symlink mode trusts a symlink only when it sits directly under the filesystem root, where an unprivileged principal cannot create one (for example `/var` on macOS). Deeper ancestors, links reached through a nonexistent tail, dangling links and loops are checked.
+- Unicode input is compared in NFKC form. Inputs that gain a separator, parent segment, drive marker, device name or trailing dot under compatibility normalization are rejected rather than rewritten. Bidirectional formatting characters are treated as control characters.
+- Percent decoding walks every syntactically valid escape in each layer and fails closed on bytes that are not UTF-8, so a malformed tail cannot hide a valid escape. Invalid percent text with no valid escapes stays literal.
 - Archive validation is cumulative and stateful. Use `createArchiveGuard` for whole archives and never reuse a guard across unrelated archives without calling `reset()`.
-- All comparisons that matter on case-insensitive filesystems are case-insensitive by default.
+- All comparisons that matter on case-insensitive filesystems are case-insensitive by default, and archive collision keys are canonical-normalized in NFC so normalization-insensitive filesystems cannot merge two accepted entries.
 
 ## Disclosure history
 

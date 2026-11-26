@@ -22,5 +22,7 @@ export default {
   sanitizeFilename,
   validateArchiveEntry,
   createArchiveGuard,
-  createCage
+  createCage,
+  isInside,
+  assertLexicalInside
 };
