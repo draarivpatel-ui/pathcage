@@ -9,7 +9,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately using GitHub's "Report a vulnerability" feature on the repository's Security tab. Do not open a public issue for an exploitable finding.
+Use the private GitHub Security Advisories form: [Report a vulnerability](https://github.com/draarivpatel-ui/pathcage/security/advisories/new). Do not open a public issue for an exploitable finding.
 
 Include:
 
@@ -18,7 +18,7 @@ Include:
 - The expected containment boundary and the observed violation.
 - An assessment of impact (for example: escape from an upload root, archive write outside destination).
 
-You should receive an acknowledgement within 7 days. We will work with you on a fix and coordinate disclosure. Please give maintainers a reasonable window to release a patch before public disclosure.
+We acknowledge reports within 48 hours. We aim to confirm or reject the report within 7 days, release a fix as soon as practical, and coordinate public disclosure with the reporter. Unless a shorter deadline is required by an actively exploited issue, please allow up to 90 days for a coordinated fix and disclosure.
 
 ## Scope
 
