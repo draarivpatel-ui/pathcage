@@ -59,12 +59,12 @@ test('zero-path hygiene: limits of zero reject all entries', () => {
   );
 });
 
-test('package manifest has zero runtime dependencies', () => {
+test('package manifest keeps runtime dependencies empty and fast-check development-only', () => {
   const pkg = JSON.parse(
     fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
   );
   assert.deepEqual(pkg.dependencies, {});
-  assert.deepEqual(pkg.devDependencies, {});
+  assert.deepEqual(pkg.devDependencies, { 'fast-check': '4.10.3' });
   assert.equal(pkg.name, 'pathcage');
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.exports['.'].import, './src/index.mjs');
