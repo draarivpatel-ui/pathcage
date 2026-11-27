@@ -1,5 +1,7 @@
 # pathcage
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/draarivpatel-ui/pathcage/badge)](https://scorecard.dev/viewer/?uri=github.com/draarivpatel-ui/pathcage)
+
 Zero-dependency path traversal, zip-slip and symlink-escape protection for Node.js.
 
 `pathcage` is a small, auditable security library for any code that turns untrusted strings into filesystem paths: upload endpoints, archive extractors, static file servers, plugin loaders, MCP filesystem tools and agent sandboxes. It works on every platform, in both ESM and CommonJS, with strict TypeScript definitions and no runtime dependencies.
